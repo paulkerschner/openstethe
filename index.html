@@ -19,6 +19,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#0f1419">
 <title>OpenSteth</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <style>
   :root{--bg:#0f1419;--card:#182029;--line:#26313d;--text:#e6edf3;--muted:#8b98a5;--acc:#3ddc97;--rec:#ff5c5c;--warn:#ffb020}
   *{box-sizing:border-box}
@@ -63,6 +66,7 @@
 <main>
   <h1>OpenSteth</h1>
   <div class="sub">Offene App für das Hanhong POPULAR-3 · Daten bleiben auf diesem Gerät</div>
+  <button id="btnInstall" class="big" hidden style="margin-bottom:12px">⤓ Als App installieren</button>
 
   <div id="unsupported" class="card msg" hidden>
     Dieser Browser unterstützt kein Web Bluetooth. Bitte Chrome auf Android verwenden
@@ -522,6 +526,17 @@ async function renderList() {
   }
 }
 renderList();
+
+// ----- Installierbar als App (PWA) -----
+if ('serviceWorker' in navigator && window.isSecureContext && location.protocol !== 'file:') {
+  navigator.serviceWorker.register('sw.js').catch(e => log('Offline-Modus nicht verfügbar: ' + e.message));
+}
+let installPrompt = null;
+window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installPrompt = e; $('btnInstall').hidden = false; });
+$('btnInstall').onclick = async () => {
+  if (!installPrompt) return;
+  installPrompt.prompt(); await installPrompt.userChoice; installPrompt = null; $('btnInstall').hidden = true;
+};
 </script>
 </body>
 </html>

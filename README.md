@@ -8,18 +8,19 @@ Alle Aufnahmen bleiben im Browser des Handys.
 
 ## Nutzung
 
-1. `index.html` über **https** bereitstellen, z. B. mit GitHub Pages (siehe unten).
+1. **Alle Dateien** dieses Ordners über **https** bereitstellen, z. B. mit GitHub Pages (siehe unten).
 2. Auf Android in **Chrome** öffnen → „Verbinden“ → das Stethoskop auswählen.
 3. „Live starten“ zum Mithören (Kopfhörer ans Handy), „Aufnehmen“ für eine WAV-Datei.
    Die Aufnahme-Taste am Stethoskop startet und stoppt die Aufnahme ebenfalls.
-4. Chrome-Menü → „Zum Startbildschirm hinzufügen“ legt ein App-Icon an.
+4. Als App installieren: Button „Als App installieren“ in der App, oder Chrome-Menü (⋮) → „App installieren“.
+   Danach startet OpenSteth wie eine normale App mit eigenem Icon, ohne Browserleiste, und funktioniert auch offline.
 
 Web Bluetooth funktioniert nur in Chrome/Edge (Android, Windows, macOS, ChromeOS), nicht auf dem iPhone.
 
 ### GitHub Pages in 3 Minuten
 
 1. Auf github.com ein neues öffentliches Repository anlegen, z. B. `openstethe`.
-2. „Add file → Upload files“ → `index.html` (und diese README) hochladen → Commit.
+2. „Add file → Upload files“ → alle Dateien aus der ZIP hochladen (nicht den Ordner selbst) → Commit.
 3. Settings → Pages → Source: „Deploy from a branch“, Branch `main`, Ordner `/ (root)` → Save.
 4. Nach ca. 1 Minute ist die App unter `https://<benutzername>.github.io/openstethe/` erreichbar.
 
