@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<!--
+  OpenSteth – offene Web-App für das Hanhong POPULAR-3 Digitalstethoskop
+  Lizenz: MIT. Keine Cloud, keine Tracker: alle Aufnahmen bleiben im Browser.
+  Kein Medizinprodukt – nur zur Aufnahme/Wiedergabe, nicht zur Diagnose.
+
+  Protokoll (per BLE-Mitschnitt ermittelt):
+    Nordic UART Service 6e400001-b5a3-f393-e0a9-e50e24dcca9e
+      6e400002 = Befehle schreiben (ASCII, Abschluss "\r")
+      6e400003 = Antworten/Audio (Notify)
+    Befehle: testdev, model, uniqueid, battery, version, userlogin 0000,
+             RealtimeRecordExt (Audio starten), RealTimeStop (stoppen)
+    Audio: "PCM_SYNC" + 400 Bytes = 200 Samples int16 little-endian, ~11025 Hz mono
+           In-Band-Ereignisse: "PCM_SYNC" + "PCM_CMDF<Text>\r" (z. B. LungMode, RecordStart, RecordStop)
+-->
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0f1419">
+<title>OpenSteth</title>
+<style>
+  :root{--bg:#0f1419;--card:#182029;--line:#26313d;--text:#e6edf3;--muted:#8b98a5;--acc:#3ddc97;--rec:#ff5c5c;--warn:#ffb020}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:16px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;-webkit-tap-highlight-color:transparent}
+  main{max-width:640px;margin:0 auto;padding:16px 14px 40px}
+  h1{font-size:20px;margin:4px 0 2px;letter-spacing:.2px}
+  .sub{color:var(--muted);font-size:13px;margin-bottom:14px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .grow{flex:1}
+  button{font:inherit;border:0;border-radius:10px;padding:12px 16px;background:#2a3542;color:var(--text);cursor:pointer;min-height:46px}
+  button.primary{background:var(--acc);color:#06281a;font-weight:600}
+  button.rec{background:var(--rec);color:#fff;font-weight:600}
+  button:disabled{opacity:.4;cursor:default}
+  .big{width:100%;font-size:17px}
+  .stat{font-size:13px;color:var(--muted)}
+  .stat b{color:var(--text);font-weight:600}
+  .dot{width:10px;height:10px;border-radius:50%;background:#55606b;display:inline-block;margin-right:6px}
+  .dot.on{background:var(--acc)} .dot.live{background:var(--rec);animation:p 1s infinite}
+  @keyframes p{50%{opacity:.3}}
+  canvas{width:100%;height:160px;display:block;background:#0b1015;border-radius:10px}
+  label{font-size:13px;color:var(--muted)}
+  input[type=range]{width:100%}
+  select{font:inherit;background:#2a3542;color:var(--text);border:0;border-radius:10px;padding:10px}
+  .badge{font-size:12px;padding:3px 8px;border-radius:99px;background:#2a3542;color:var(--muted)}
+  .badge.recb{background:var(--rec);color:#fff}
+  ul{list-style:none;margin:0;padding:0}
+  li{border-top:1px solid var(--line);padding:10px 0}
+  li:first-child{border-top:0}
+  li .name{font-weight:600;word-break:break-word}
+  li audio{width:100%;margin:8px 0 6px;height:36px}
+  li button{padding:8px 12px;min-height:38px;font-size:14px}
+  .msg{font-size:14px;color:var(--warn)}
+  .log{font:12px/1.35 ui-monospace,monospace;color:var(--muted);max-height:140px;overflow:auto;white-space:pre-wrap}
+  details summary{cursor:pointer;color:var(--muted);font-size:13px}
+  .empty{color:var(--muted);font-size:14px}
+  dialog{background:var(--card);color:var(--text);border:1px solid var(--line);border-radius:14px;max-width:92vw}
+  dialog input{font:inherit;width:100%;padding:10px;border-radius:8px;border:1px solid var(--line);background:#0b1015;color:var(--text)}
+</style>
+</head>
+<body>
+<main>
+  <h1>OpenSteth</h1>
+  <div class="sub">Offene App für das Hanhong POPULAR-3 · Daten bleiben auf diesem Gerät</div>
+
+  <div id="unsupported" class="card msg" hidden>
+    Dieser Browser unterstützt kein Web Bluetooth. Bitte Chrome auf Android verwenden
+    und die Seite über https:// öffnen.
+  </div>
+
+  <section class="card">
+    <div class="row">
+      <div class="grow"><span id="dot" class="dot"></span><b id="state">Nicht verbunden</b></div>
+      <span id="modeBadge" class="badge" hidden></span>
+    </div>
+    <div class="stat" style="margin-top:8px">
+      Gerät: <b id="model">–</b> · Akku: <b id="bat">–</b> · Firmware: <b id="fw">–</b>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button id="btnConnect" class="primary grow">Verbinden</button>
+      <button id="btnDisconnect" hidden>Trennen</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <canvas id="scope" width="1200" height="320"></canvas>
+    <div class="row" style="margin-top:12px">
+      <button id="btnLive" class="grow" disabled>▶ Live starten</button>
+      <button id="btnRec" class="rec grow" disabled>● Aufnehmen</button>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <span id="recBadge" class="badge" hidden>REC 0:00</span>
+      <span class="stat grow" id="hint">Die Aufnahme-Taste am Stethoskop funktioniert auch.</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="row">
+      <label class="row" style="gap:6px"><input type="checkbox" id="monitor" checked> Mithören (Kopfhörer am Handy)</label>
+    </div>
+    <div style="margin-top:10px">
+      <label for="gain">Lautstärke: <span id="gainVal">1.0×</span></label>
+      <input id="gain" type="range" min="0.5" max="12" step="0.5" value="1">
+    </div>
+    <div class="row" style="margin-top:8px">
+      <label for="filter">Filter (nur fürs Mithören, Aufnahme bleibt original):</label>
+      <select id="filter">
+        <option value="off">Aus (Gerät filtert selbst)</option>
+        <option value="heart">Herz 20–200 Hz</option>
+        <option value="lung">Lunge 100–1000 Hz</option>
+      </select>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="row" style="margin-bottom:6px"><b class="grow">Aufnahmen</b><span class="stat" id="recCount"></span></div>
+    <ul id="list"></ul>
+    <div id="empty" class="empty">Noch keine Aufnahmen.</div>
+  </section>
+
+  <details class="card">
+    <summary>Protokoll / Fehlersuche</summary>
+    <div id="log" class="log" style="margin-top:8px"></div>
+  </details>
+
+  <div class="stat" style="text-align:center;margin-top:16px">
+    Kein Medizinprodukt · nicht zur Diagnose · MIT-Lizenz
+  </div>
+</main>
+
+<dialog id="renameDlg">
+  <form method="dialog">
+    <div style="margin-bottom:8px">Name / Notiz</div>
+    <input id="renameInput" maxlength="120">
+    <div class="row" style="margin-top:12px;justify-content:flex-end">
+      <button value="cancel">Abbrechen</button>
+      <button value="ok" class="primary">Speichern</button>
+    </div>
+  </form>
+</dialog>
+
+<script id="protocol">
+// ---------- Protokoll-Parser (ohne DOM, auch in Node testbar) ----------
+const SAMPLE_RATE = 11025;
+const SYNC = [80,67,77,95,83,89,78,67];           // "PCM_SYNC"
+const CMD  = [80,67,77,95,67,77,68,70];           // "PCM_CMDF"
+
+function indexOfSeq(buf, seq, from) {
+  outer: for (let i = from || 0; i <= buf.length - seq.length; i++) {
+    for (let j = 0; j < seq.length; j++) if (buf[i + j] !== seq[j]) continue outer;
+    return i;
+  }
+  return -1;
+}
+function startsWithAt(buf, seq, at) {
+  if (buf.length - at < seq.length) return false;
+  for (let j = 0; j < seq.length; j++) if (buf[at + j] !== seq[j]) return false;
+  return true;
+}
+
+// Zerlegt den Notify-Strom in Audio-Frames (Int16Array) und Ereignisse (Strings).
+class StreamParser {
+  constructor(onSamples, onEvent) {
+    this.onSamples = onSamples; this.onEvent = onEvent;
+    this.buf = new Uint8Array(0);
+  }
+  reset() { this.buf = new Uint8Array(0); }
+  push(chunk) {
+    const n = new Uint8Array(this.buf.length + chunk.length);
+    n.set(this.buf); n.set(chunk, this.buf.length); this.buf = n;
+    for (;;) {
+      const s0 = indexOfSeq(this.buf, SYNC, 0);
+      if (s0 < 0) { if (this.buf.length > 4096) this.buf = this.buf.slice(-7); return; }
+      const s1 = indexOfSeq(this.buf, SYNC, s0 + 8);
+      if (s1 < 0) {
+        if (s0 > 0) this.buf = this.buf.slice(s0);
+        // Ereignisse direkt nach dem Sync sofort melden (z. B. RecordStop als letztes Paket)
+        while (startsWithAt(this.buf, CMD, 8)) {
+          const end = this.buf.indexOf(13, 16);
+          if (end < 0) return;
+          this.onEvent(String.fromCharCode(...this.buf.subarray(16, end)));
+          const n2 = new Uint8Array(this.buf.length - (end + 1 - 8));
+          n2.set(this.buf.subarray(0, 8)); n2.set(this.buf.subarray(end + 1), 8);
+          this.buf = n2;
+        }
+        // Notbremse: kein zweiter Sync in Sicht → Frame mit fester Länge ausgeben
+        if (this.buf.length > 8 + 400 + 512) { this._segment(this.buf.subarray(8, 408)); this.buf = this.buf.slice(408); }
+        return;
+      }
+      this._segment(this.buf.subarray(s0 + 8, s1));
+      this.buf = this.buf.slice(s1);
+    }
+  }
+  _segment(seg) {
+    let p = 0;
+    while (startsWithAt(seg, CMD, p)) {
+      const end = seg.indexOf(13, p);
+      if (end < 0) return;
+      this.onEvent(String.fromCharCode(...seg.subarray(p + 8, end)));
+      p = end + 1;
+    }
+    const len = (seg.length - p) & ~1;
+    if (len <= 0) return;
+    const out = new Int16Array(len / 2);
+    const dv = new DataView(seg.buffer, seg.byteOffset + p, len);
+    for (let i = 0; i < out.length; i++) out[i] = dv.getInt16(i * 2, true);
+    this.onSamples(out);
+  }
+}
+
+function makeWav(int16, rate) {
+  const b = new ArrayBuffer(44 + int16.length * 2), v = new DataView(b);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, 'RIFF'); v.setUint32(4, 36 + int16.length * 2, true); w(8, 'WAVE');
+  w(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  w(36, 'data'); v.setUint32(40, int16.length * 2, true);
+  new Int16Array(b, 44).set(int16);
+  return b;
+}
+if (typeof module !== 'undefined') module.exports = { StreamParser, makeWav, SAMPLE_RATE };
+</script>
+
+<script>
+// ---------- App ----------
+const NUS     = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const NUS_TX  = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'; // App → Gerät
+const NUS_RX  = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'; // Gerät → App
+const $ = id => document.getElementById(id);
+
+let device = null, txChar = null, rxChar = null;
+let streaming = false, recording = false, recChunks = [], recSamples = 0, recStart = 0;
+let lineBuf = '', pollTimer = null, wakeLock = null;
+const enc = new TextEncoder();
+
+function log(s) {
+  const el = $('log'); const t = new Date().toLocaleTimeString();
+  el.textContent = (t + '  ' + s + '\n' + el.textContent).slice(0, 6000);
+}
+
+if (!('bluetooth' in navigator)) { $('unsupported').hidden = false; $('btnConnect').disabled = true; }
+
+// ----- Befehle (seriell, da BLE keine parallelen Schreibvorgänge mag) -----
+let writeQueue = Promise.resolve();
+function send(cmd) {
+  writeQueue = writeQueue.then(async () => {
+    if (!txChar) return;
+    const data = enc.encode(cmd + '\r');
+    try {
+      if (txChar.writeValueWithoutResponse) await txChar.writeValueWithoutResponse(data);
+      else await txChar.writeValue(data);
+      log('→ ' + cmd);
+    } catch (e) { log('Schreibfehler: ' + e.message); }
+    await new Promise(r => setTimeout(r, 30));
+  });
+  return writeQueue;
+}
+
+// ----- Empfang -----
+const parser = new StreamParser(onSamples, onDeviceEvent);
+function onNotify(ev) {
+  const v = ev.target.value;
+  const bytes = new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+  if (streaming) { parser.push(bytes); return; }
+  // Textmodus: Zeilen mit \r\n
+  for (const c of bytes) {
+    if (c === 10) continue;
+    if (c === 13) { handleLine(lineBuf.trim()); lineBuf = ''; continue; }
+    if (c >= 32 && c < 127) lineBuf += String.fromCharCode(c); else lineBuf = '';
+    if (lineBuf.length > 200) lineBuf = '';
+  }
+}
+function handleLine(l) {
+  if (!l || l === 'SYNC' || l === 'ready') return;
+  log('← ' + l);
+  let m;
+  if (/^POPULAR/i.test(l) || /^MD\d|^DS\d/i.test(l)) $('model').textContent = l;
+  else if ((m = l.match(/voltage\s+([\d.]+)v/i))) {
+    $('bat').textContent = parseFloat(m[1]).toFixed(2) + ' V';
+  }
+  else if ((m = l.match(/firmware\s+(V[\d.]+)/i))) $('fw').textContent = m[1];
+  else if (/authentication OK/i.test(l)) setState('Verbunden', 'on');
+}
+function onDeviceEvent(e) {
+  log('Gerät: ' + e);
+  if (/Mode$/.test(e)) {
+    const names = { LungMode: 'Lunge', HeartMode: 'Herz', BellMode: 'Glocke', DiaphragmMode: 'Membran' };
+    $('modeBadge').hidden = false; $('modeBadge').textContent = 'Modus: ' + (names[e] || e.replace(/Mode$/, ''));
+  }
+  if (e === 'RecordStart' && !recording) startRecording();
+  if (e === 'RecordStop' && recording) stopRecording();
+}
+
+// ----- Verbindung -----
+$('btnConnect').onclick = connect;
+$('btnDisconnect').onclick = () => { if (device && device.gatt.connected) device.gatt.disconnect(); };
+
+async function connect() {
+  try {
+    ensureAudio();
+    setState('Suche Gerät …');
+    device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: [NUS] });
+    device.addEventListener('gattserverdisconnected', onDisconnected);
+    setState('Verbinde mit ' + (device.name || 'Gerät') + ' …');
+    const server = await device.gatt.connect();
+    const svc = await server.getPrimaryService(NUS);
+    txChar = await svc.getCharacteristic(NUS_TX);
+    rxChar = await svc.getCharacteristic(NUS_RX);
+    rxChar.addEventListener('characteristicvaluechanged', onNotify);
+    await rxChar.startNotifications();
+    log('Verbunden mit ' + (device.name || device.id));
+    for (const c of ['testdev', 'model', 'uniqueid', 'battery', 'version', 'userlogin 0000']) await send(c);
+    setState('Verbunden', 'on');
+    $('btnConnect').hidden = true; $('btnDisconnect').hidden = false;
+    $('btnLive').disabled = false; $('btnRec').disabled = false;
+    startPolling();
+  } catch (e) {
+    log('Fehler: ' + e.message);
+    setState(e.name === 'NotFoundError' ? 'Nicht verbunden' : 'Fehler: ' + e.message);
+  }
+}
+function onDisconnected() {
+  log('Verbindung getrennt');
+  if (recording) stopRecording();
+  streaming = false; txChar = rxChar = null; stopPolling(); releaseWake();
+  setState('Nicht verbunden');
+  $('btnConnect').hidden = false; $('btnDisconnect').hidden = true;
+  $('btnLive').disabled = true; $('btnRec').disabled = true; $('btnLive').textContent = '▶ Live starten';
+}
+// Hält die Verbindung wach und aktualisiert den Akku (wie die Original-App)
+function startPolling() { stopPolling(); pollTimer = setInterval(() => { if (!streaming) { send('battery'); send('testdev'); } }, 5000); }
+function stopPolling() { if (pollTimer) clearInterval(pollTimer); pollTimer = null; }
+
+function setState(t, kind) {
+  $('state').textContent = t;
+  $('dot').className = 'dot' + (kind === 'on' ? ' on' : kind === 'live' ? ' live' : '');
+}
+
+// ----- Live-Stream -----
+$('btnLive').onclick = () => streaming ? stopLive() : startLive();
+async function startLive() {
+  ensureAudio();
+  parser.reset(); lineBuf = '';
+  streaming = true;
+  await send('RealtimeRecordExt');
+  $('btnLive').textContent = '■ Live stoppen';
+  setState('Live', 'live');
+  try { wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
+}
+async function stopLive() {
+  if (recording) stopRecording();
+  await send('RealTimeStop');
+  setTimeout(() => { streaming = false; lineBuf = ''; }, 300);
+  $('btnLive').textContent = '▶ Live starten';
+  setState('Verbunden', 'on');
+  releaseWake();
+}
+function releaseWake() { try { wakeLock && wakeLock.release(); } catch (e) {} wakeLock = null; }
+
+// ----- Audio-Ausgabe -----
+let actx = null, gainNode = null, inNode = null, nextTime = 0, pend = [], pendLen = 0;
+let hp = null, lp = null;
+function ensureAudio() {
+  if (actx) { if (actx.state === 'suspended') actx.resume(); return; }
+  try {
+    actx = new (window.AudioContext || window.webkitAudioContext)();
+    gainNode = actx.createGain(); gainNode.gain.value = 1;
+    hp = actx.createBiquadFilter(); hp.type = 'highpass';
+    lp = actx.createBiquadFilter(); lp.type = 'lowpass';
+    inNode = actx.createGain();
+    applyFilter();
+    gainNode.connect(actx.destination);
+  } catch (e) { log('Audio nicht verfügbar: ' + e.message); }
+}
+function applyFilter() {
+  if (!actx) return;
+  inNode.disconnect(); hp.disconnect(); lp.disconnect();
+  const f = $('filter').value;
+  if (f === 'off') inNode.connect(gainNode);
+  else {
+    hp.frequency.value = f === 'heart' ? 20 : 100;
+    lp.frequency.value = f === 'heart' ? 200 : 1000;
+    inNode.connect(hp); hp.connect(lp); lp.connect(gainNode);
+  }
+}
+$('filter').onchange = applyFilter;
+$('gain').oninput = () => {
+  const g = parseFloat($('gain').value);
+  $('gainVal').textContent = g.toFixed(1) + '×';
+  if (gainNode) gainNode.gain.value = g;
+};
+
+function playChunk(int16) {
+  if (!actx || !$('monitor').checked) return;
+  pend.push(int16); pendLen += int16.length;
+  if (pendLen < 1100) return;                         // ~100 ms bündeln
+  const buf = actx.createBuffer(1, pendLen, SAMPLE_RATE);
+  const ch = buf.getChannelData(0); let o = 0;
+  for (const a of pend) { for (let i = 0; i < a.length; i++) ch[o++] = a[i] / 32768; }
+  pend = []; pendLen = 0;
+  const src = actx.createBufferSource(); src.buffer = buf; src.connect(inNode);
+  const now = actx.currentTime;
+  if (nextTime < now + 0.05 || nextTime > now + 1.0) nextTime = now + 0.25;   // Jitterpuffer
+  src.start(nextTime); nextTime += buf.duration;
+}
+
+// ----- Anzeige -----
+const SCOPE_LEN = SAMPLE_RATE * 4;                    // 4 Sekunden
+const scopeBuf = new Float32Array(SCOPE_LEN); let scopePos = 0, dirty = true;
+function onSamples(int16) {
+  for (let i = 0; i < int16.length; i++) { scopeBuf[scopePos] = int16[i] / 32768; scopePos = (scopePos + 1) % SCOPE_LEN; }
+  dirty = true;
+  playChunk(int16);
+  if (recording) { recChunks.push(int16.slice()); recSamples += int16.length; }
+}
+const cv = $('scope'), g2 = cv.getContext('2d');
+function draw() {
+  requestAnimationFrame(draw);
+  if (!dirty) return; dirty = false;
+  const W = cv.width, H = cv.height, mid = H / 2;
+  g2.fillStyle = '#0b1015'; g2.fillRect(0, 0, W, H);
+  g2.strokeStyle = '#1c2630'; g2.beginPath(); g2.moveTo(0, mid); g2.lineTo(W, mid); g2.stroke();
+  let peak = 0.02;
+  for (let i = 0; i < SCOPE_LEN; i++) { const a = Math.abs(scopeBuf[i]); if (a > peak) peak = a; }
+  const scale = (mid - 6) / Math.min(1, peak * 1.1);
+  g2.strokeStyle = recording ? '#ff7a7a' : '#3ddc97'; g2.lineWidth = 2; g2.beginPath();
+  const per = SCOPE_LEN / W;
+  for (let x = 0; x < W; x++) {
+    let mn = 1, mx = -1;
+    const s = Math.floor(x * per), e = Math.floor((x + 1) * per);
+    for (let k = s; k < e; k++) { const v = scopeBuf[(scopePos + k) % SCOPE_LEN]; if (v < mn) mn = v; if (v > mx) mx = v; }
+    g2.moveTo(x + .5, mid - mx * scale); g2.lineTo(x + .5, mid - mn * scale + 1);
+  }
+  g2.stroke();
+}
+requestAnimationFrame(draw);
+
+// ----- Aufnahme -----
+$('btnRec').onclick = async () => {
+  if (recording) return stopRecording();
+  if (!streaming) await startLive();
+  startRecording();
+};
+let recTimer = null;
+function startRecording() {
+  recording = true; recChunks = []; recSamples = 0; recStart = Date.now();
+  $('btnRec').textContent = '■ Aufnahme beenden';
+  $('recBadge').hidden = false; $('recBadge').className = 'badge recb';
+  recTimer = setInterval(() => {
+    const s = Math.floor(recSamples / SAMPLE_RATE);
+    $('recBadge').textContent = 'REC ' + Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+  }, 250);
+}
+async function stopRecording() {
+  recording = false; clearInterval(recTimer);
+  $('btnRec').textContent = '● Aufnehmen'; $('recBadge').hidden = true;
+  if (recSamples < SAMPLE_RATE / 2) { log('Aufnahme zu kurz, verworfen'); return; }
+  const all = new Int16Array(recSamples); let o = 0;
+  for (const c of recChunks) { all.set(c, o); o += c.length; }
+  recChunks = [];
+  const d = new Date(recStart);
+  const rec = {
+    id: recStart, created: recStart, samples: all.length,
+    name: 'Aufnahme ' + d.toLocaleDateString('de-AT') + ' ' + d.toLocaleTimeString('de-AT', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+    mode: $('modeBadge').hidden ? '' : $('modeBadge').textContent.replace('Modus: ', ''),
+    wav: new Blob([makeWav(all, SAMPLE_RATE)], { type: 'audio/wav' })
+  };
+  await dbPut(rec); renderList();
+}
+
+// ----- Speicher (IndexedDB, nur lokal) -----
+let dbP = null, memStore = new Map();
+function db() {
+  if (!dbP) dbP = new Promise((res) => {
+    try {
+      const r = indexedDB.open('openstethe', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('recs', { keyPath: 'id' });
+      r.onsuccess = () => res(r.result); r.onerror = () => res(null);
+    } catch (e) { res(null); }
+  });
+  return dbP;
+}
+async function tx(mode, fn) {
+  const d = await db(); if (!d) return null;
+  return new Promise((res, rej) => { const t = d.transaction('recs', mode); const r = fn(t.objectStore('recs')); t.oncomplete = () => res(r && r.result); t.onerror = () => rej(t.error); });
+}
+async function dbPut(r) { memStore.set(r.id, r); try { await tx('readwrite', s => s.put(r)); } catch (e) { log('Speichern fehlgeschlagen: ' + e.message); } }
+async function dbDel(id) { memStore.delete(id); try { await tx('readwrite', s => s.delete(id)); } catch (e) {} }
+async function dbAll() { try { const a = await tx('readonly', s => s.getAll()); if (a) return a; } catch (e) {} return [...memStore.values()]; }
+
+const urls = [];
+async function renderList() {
+  urls.forEach(URL.revokeObjectURL); urls.length = 0;
+  const all = (await dbAll()).sort((a, b) => b.created - a.created);
+  $('empty').hidden = all.length > 0; $('recCount').textContent = all.length ? all.length + '' : '';
+  const ul = $('list'); ul.innerHTML = '';
+  for (const r of all) {
+    const url = URL.createObjectURL(r.wav); urls.push(url);
+    const li = document.createElement('li');
+    const secs = (r.samples / SAMPLE_RATE).toFixed(1);
+    li.innerHTML = `<div class="name"></div><div class="stat"></div><audio controls preload="none"></audio>
+      <div class="row"><button data-a="dl">Speichern</button><button data-a="share">Teilen</button><button data-a="ren">Umbenennen</button><button data-a="del">Löschen</button></div>`;
+    li.querySelector('.name').textContent = r.name;
+    li.querySelector('.stat').textContent = secs + ' s' + (r.mode ? ' · ' + r.mode : '');
+    li.querySelector('audio').src = url;
+    const fname = r.name.replace(/[^\wäöüÄÖÜß.-]+/g, '_') + '.wav';
+    li.onclick = async (e) => {
+      const a = e.target.dataset && e.target.dataset.a; if (!a) return;
+      if (a === 'dl') { const l = document.createElement('a'); l.href = url; l.download = fname; document.body.appendChild(l); l.click(); l.remove(); }
+      if (a === 'share') {
+        const f = new File([r.wav], fname, { type: 'audio/wav' });
+        try { await navigator.share({ files: [f], title: r.name }); } catch (err) { log('Teilen nicht möglich: ' + err.message); }
+      }
+      if (a === 'ren') {
+        const dlg = $('renameDlg'); $('renameInput').value = r.name; dlg.showModal();
+        dlg.onclose = async () => { if (dlg.returnValue === 'ok' && $('renameInput').value.trim()) { r.name = $('renameInput').value.trim(); await dbPut(r); renderList(); } };
+      }
+      if (a === 'del') { if (e.target.dataset.sure) { await dbDel(r.id); renderList(); } else { e.target.dataset.sure = 1; e.target.textContent = 'Wirklich löschen?'; } }
+    };
+    ul.appendChild(li);
+  }
+}
+renderList();
+</script>
+</body>
+</html>
