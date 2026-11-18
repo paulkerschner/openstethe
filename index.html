@@ -281,7 +281,11 @@ function handleLine(l) {
   let m;
   if (/^POPULAR/i.test(l) || /^MD\d|^DS\d/i.test(l)) $('model').textContent = l;
   else if ((m = l.match(/voltage\s+([\d.]+)v/i))) {
-    $('bat').textContent = parseFloat(m[1]).toFixed(2) + ' V';
+    // 2× AAA Alkali: 2,0 V = leer, 3,0 V = voll (deckt sich mit der Anzeige am Gerät: 2,38 V ≈ 38 %)
+    const volt = parseFloat(m[1]);
+    const pct = Math.max(0, Math.min(100, Math.round((volt - 2.0) * 100)));
+    $('bat').textContent = pct + ' % (' + volt.toFixed(2) + ' V)';
+    $('bat').style.color = pct <= 15 ? 'var(--rec)' : '';
   }
   else if ((m = l.match(/firmware\s+(V[\d.]+)/i))) $('fw').textContent = m[1];
   else if (/authentication OK/i.test(l)) setState('Verbunden', 'on');

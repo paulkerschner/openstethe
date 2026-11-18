@@ -1,5 +1,5 @@
 // Offline-Cache für OpenSteth: App läuft nach dem ersten Öffnen auch ohne Internet.
-const CACHE = 'openstethe-v1';
+const CACHE = 'openstethe-v2';
 const FILES = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './icon-maskable-512.png', './apple-touch-icon.png'];
 
 self.addEventListener('install', e => {
