@@ -83,7 +83,12 @@
     </div>
     <div class="row" style="margin-top:12px">
       <button id="btnConnect" class="primary grow">Verbinden</button>
+      <button id="btnOther" hidden>Anderes Gerät</button>
       <button id="btnDisconnect" hidden>Trennen</button>
+    </div>
+    <div id="rememberHint" class="stat" hidden style="margin-top:10px">
+      Tipp: Damit Chrome das Stethoskop dauerhaft merkt, in Chrome
+      <b>chrome://flags/#enable-web-bluetooth-new-permissions-backend</b> auf „Enabled“ stellen und Chrome neu starten.
     </div>
   </section>
 
@@ -301,17 +306,58 @@ function onDeviceEvent(e) {
 }
 
 // ----- Verbindung -----
-$('btnConnect').onclick = connect;
-$('btnDisconnect').onclick = () => { if (device && device.gatt.connected) device.gatt.disconnect(); };
+// Merken: Solange die App offen ist, wird das gewählte Gerät wiederverwendet.
+// Über Neustarts hinweg nur, wenn Chrome getDevices() anbietet
+// (chrome://flags/#enable-web-bluetooth-new-permissions-backend).
+const LAST_KEY = 'openstethe-last-device';
+let userDisconnect = false, connecting = false;
+const store = { get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+                set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} } };
 
-async function connect() {
+$('btnConnect').onclick = () => connect(false);
+$('btnOther').onclick = () => connect(true);
+$('btnDisconnect').onclick = () => { userDisconnect = true; if (device && device.gatt.connected) device.gatt.disconnect(); };
+
+async function rememberedDevice() {
+  if (!navigator.bluetooth || !navigator.bluetooth.getDevices) return null;
+  try {
+    const list = await navigator.bluetooth.getDevices();
+    const last = store.get(LAST_KEY);
+    return list.find(d => d.id === last) || (list.length === 1 ? list[0] : null);
+  } catch (e) { return null; }
+}
+
+// Wartet, bis ein gemerktes Gerät in Reichweite ist (falls der Browser das kann)
+function waitForAdvert(dev, ms) {
+  if (!dev.watchAdvertisements) return Promise.resolve();
+  return new Promise(res => {
+    const ac = new AbortController();
+    const done = () => { ac.abort(); res(); };
+    dev.addEventListener('advertisementreceived', done, { once: true });
+    dev.watchAdvertisements({ signal: ac.signal }).catch(done);
+    setTimeout(done, ms);
+  });
+}
+
+async function connect(chooseNew) {
+  if (connecting) return; connecting = true; userDisconnect = false;
   try {
     ensureAudio();
-    setState('Suche Gerät …');
-    device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: [NUS] });
-    device.addEventListener('gattserverdisconnected', onDisconnected);
+    let dev = chooseNew ? null : (device || await rememberedDevice());
+    if (!dev) {
+      setState('Suche Gerät …');
+      dev = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: [NUS] });
+    }
+    if (dev !== device) {
+      if (device) device.removeEventListener('gattserverdisconnected', onDisconnected);
+      device = dev;
+      device.addEventListener('gattserverdisconnected', onDisconnected);
+    }
+    store.set(LAST_KEY, device.id);
     setState('Verbinde mit ' + (device.name || 'Gerät') + ' …');
-    const server = await device.gatt.connect();
+    let server;
+    try { server = await device.gatt.connect(); }
+    catch (e) { await waitForAdvert(device, 8000); server = await device.gatt.connect(); }
     const svc = await server.getPrimaryService(NUS);
     txChar = await svc.getCharacteristic(NUS_TX);
     rxChar = await svc.getCharacteristic(NUS_RX);
@@ -320,22 +366,37 @@ async function connect() {
     log('Verbunden mit ' + (device.name || device.id));
     for (const c of ['testdev', 'model', 'uniqueid', 'battery', 'version', 'userlogin 0000']) await send(c);
     setState('Verbunden', 'on');
-    $('btnConnect').hidden = true; $('btnDisconnect').hidden = false;
+    $('btnConnect').hidden = true; $('btnOther').hidden = true; $('btnDisconnect').hidden = false;
     $('btnLive').disabled = false; $('btnRec').disabled = false;
     startPolling();
   } catch (e) {
     log('Fehler: ' + e.message);
     setState(e.name === 'NotFoundError' ? 'Nicht verbunden' : 'Fehler: ' + e.message);
-  }
+    showConnectButtons();
+  } finally { connecting = false; }
+}
+function showConnectButtons() {
+  $('btnConnect').hidden = false; $('btnDisconnect').hidden = true;
+  $('btnConnect').textContent = device ? 'Mit ' + (device.name || 'Stethoskop') + ' verbinden' : 'Verbinden';
+  $('btnOther').hidden = !device;
 }
 function onDisconnected() {
   log('Verbindung getrennt');
   if (recording) stopRecording();
   streaming = false; txChar = rxChar = null; stopPolling(); releaseWake();
   setState('Nicht verbunden');
-  $('btnConnect').hidden = false; $('btnDisconnect').hidden = true;
+  showConnectButtons();
   $('btnLive').disabled = true; $('btnRec').disabled = true; $('btnLive').textContent = '▶ Live starten';
+  // Automatisch wieder verbinden, außer man hat selbst getrennt
+  if (!userDisconnect) setTimeout(() => { if (device && !device.gatt.connected) { setState('Verbindung verloren – verbinde neu …'); connect(false); } }, 1500);
 }
+
+// Beim Start: gemerktes Gerät automatisch verbinden (ohne Auswahl-Dialog)
+(async () => {
+  const dev = await rememberedDevice();
+  if (dev) { device = dev; device.addEventListener('gattserverdisconnected', onDisconnected); showConnectButtons(); connect(false); }
+  else if (navigator.bluetooth && !navigator.bluetooth.getDevices) $('rememberHint').hidden = false;
+})();
 // Hält die Verbindung wach und aktualisiert den Akku (wie die Original-App)
 function startPolling() { stopPolling(); pollTimer = setInterval(() => { if (!streaming) { send('battery'); send('testdev'); } }, 5000); }
 function stopPolling() { if (pollTimer) clearInterval(pollTimer); pollTimer = null; }
